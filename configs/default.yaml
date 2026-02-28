@@ -1,0 +1,54 @@
+model:
+  name: "unsloth/LFM2.5-1.2B-Instruct"
+  max_seq_length: 4096
+  lora_rank: 32
+  load_in_4bit: false
+  gpu_memory_utilization: 0.9
+  fast_inference: true
+  lora_alpha_multiplier: 2
+  random_state: 3407
+
+vllm:
+  standby_mode: true
+  min_p: 0.1
+  top_p: 1.0
+  top_k: -1
+  seed: 3407
+  temperature: 1.0
+
+data:
+  path: "data/train.jsonl"
+  prompt_field: "text"
+  chat_template: "default"
+  max_samples: null
+
+training:
+  learning_rate: 5e-6
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  lr_scheduler_type: "linear"
+  optim: "adamw_8bit"
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 4
+  num_generations: 4
+  max_prompt_length: 512
+  max_completion_length: 512
+  beta: 0.04
+  max_steps: 100
+  num_train_epochs: null
+  output_dir: "outputs"
+  logging_steps: 1
+
+output:
+  save_lora: true
+  lora_dir: "lora_adapter"
+  save_merged_16bit: false
+  save_merged_4bit: false
+  save_gguf: false
+  gguf_quantization: "q4_k_m"
+  push_to_hub: false
+  hub_repo_id: null
+  hub_token: null
+
+logging:
+  log_every: 10
