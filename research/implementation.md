@@ -1,151 +1,258 @@
-Ah, my mistake! I got ahead of myself and thought you were already holding the code. Let’s build this out from scratch.
+# Implementation Details: GRPO Trainer
 
-Since you are dealing with Unsloth and large language models, the primary enemy here is VRAM exhaustion. Calculating the log-likelihood of 8 different completions per prompt *while* holding gradients for the main model update is a recipe for an Out-Of-Memory (OOM) error if not structured perfectly.
+## Project Structure
 
-Here is the step-by-step implementation plan for your Self-Distillation GRPO loop.
+```
+remote_trainer/
+├── pyproject.toml              # uv package config
+├── configs/
+│   ├── default.yaml            # Default (unsupervised)
+│   ├── unsupervised.yaml       # Self-distillation config
+│   └── supervised.yaml         # Supervised GRPO config
+├── data/
+│   ├── train_unsupervised.jsonl
+│   └── train_supervised.jsonl
+├── scripts/
+│   └── train.py                # CLI entry point
+└── src/
+    ├── config.py               # RewardConfig with supervised_mode
+    ├── trainer.py              # GRPO trainer wrapper
+    └── rewards/
+        ├── __init__.py         # Factory function
+        ├── inverse_loss.py     # Unsupervised reward
+        └── supervised.py       # Coverage-weighted loss
+```
 
-### Phase 1: The Core Logic – The Reward Function
+---
 
-The secret sauce is the reward function. TRL’s `GRPOTrainer` allows you to pass custom reward functions that take lists of `prompts` and `completions` and return a list of float rewards.
+## 1. Unsupervised Reward: Inverse Loss
 
-Because you want the model to evaluate *itself*, we need to pass a reference to the model into the reward function, ensure we are running in `torch.no_grad()`, and strictly calculate the loss on the *completion* tokens (ignoring the prompt).
+Located in `src/rewards/inverse_loss.py`.
 
 ```python
-import torch
-
-def create_inverse_loss_reward(eval_model, tokenizer):
+def create_inverse_loss_reward(model, tokenizer):
     """
-    Creates a reward function that calculates the negative log-likelihood 
-    (inverse loss) of the completions using the provided model.
+    Reward = -perplexity(completion)
+    
+    Lower perplexity = higher reward.
+    Only calculates loss on completion tokens.
     """
     def inverse_loss_reward(prompts, completions, **kwargs):
         rewards = []
-        
-        # Unsloth is fast, but we still want to avoid massive padding matrices.
-        # Looping through the group (e.g., 8 completions) sequentially or in micro-batches
-        # is often safer for VRAM than one giant batched forward pass.
         for prompt, completion in zip(prompts, completions):
             text = prompt + completion
+            inputs = tokenizer(text, return_tensors="pt").to(model.device)
+            prompt_length = len(tokenizer(prompt, add_special_tokens=False)["input_ids"])
             
-            # Tokenize text
-            inputs = tokenizer(text, return_tensors="pt").to(eval_model.device)
-            
-            # Calculate where the prompt ends so we don't penalize the prompt text
-            prompt_tokens = tokenizer(prompt, add_special_tokens=False)["input_ids"]
-            prompt_length = len(prompt_tokens)
-            
-            with torch.no_grad(): # CRITICAL: Drop gradients for evaluation
-                outputs = eval_model(**inputs)
-                logits = outputs.logits
+            with torch.no_grad():
+                outputs = model(**inputs)
+                shift_logits = outputs.logits[..., :-1, :]
+                shift_labels = inputs["input_ids"][..., 1:]
                 
-                # Standard next-token prediction shift
-                shift_logits = logits[..., :-1, :].contiguous()
-                shift_labels = inputs["input_ids"][..., 1:].contiguous()
-                
-                # Calculate token-wise Cross Entropy Loss
                 loss_fct = torch.nn.CrossEntropyLoss(reduction='none')
                 token_losses = loss_fct(
-                    shift_logits.view(-1, shift_logits.size(-1)), 
+                    shift_logits.view(-1, shift_logits.size(-1)),
                     shift_labels.view(-1)
                 )
                 
-                # Slice the tensor to only calculate loss on the COMPLETION tokens
-                # We subtract 1 because of the shift
                 completion_losses = token_losses[prompt_length - 1:]
-                
                 if len(completion_losses) == 0:
                     rewards.append(0.0)
-                    continue
-                    
-                # Average the loss over the completion
-                avg_loss = completion_losses.mean().item()
-                
-                # Reward is INVERSE loss (lower loss = higher reward)
-                rewards.append(-avg_loss)
-                
-        return rewards
+                else:
+                    rewards.append(-completion_losses.mean().item())
         
+        return rewards
     return inverse_loss_reward
-
 ```
 
-### Phase 2: Preventing Mode Collapse (The "Teacher" vs "Student" Problem)
+---
 
-If the exact same model weights are used to both generate the text and score the text, the model will quickly discover a "cheat code": it will start generating highly repetitive, overly safe text (like "the the the") because repetitive tokens have incredibly low perplexity/loss.
+## 2. Supervised Reward: Coverage-Weighted Loss
 
-**The Solution:** You need a Reference Model.
-In GRPO, you generally maintain a frozen snapshot of the base model.
+Located in `src/rewards/supervised.py`.
 
-1. **The Policy Model (Student):** Generates the $G_1 ... G_8$ completions and gets updated.
-2. **The Reference Model (Teacher):** Used to calculate a KL-divergence penalty. This penalizes the Student if its outputs drift too far from the base model's distribution, forcing it to remain coherent while it hunts for lower loss.
+### Why Not Simple Perplexity on Answer?
 
-TRL's `GRPOTrainer` handles the KL divergence automatically under the hood, but you need to decide *which* model calculates the reward. For true self-distillation, you usually use the **Reference Model** (the frozen base weights) as the `eval_model` in the reward function above, not the actively training policy model.
+If we calculate `ppl(prompt + answer)` for all K completions, they ALL get the SAME reward because the answer is fixed. GRPO requires rewards to vary per completion for advantage calculation.
 
-### Phase 3: Wiring it up with Unsloth and TRL
+### Two Modes
 
-Here is how you piece it all together using Unsloth's optimized pipeline and Hugging Face's TRL.
+#### Mode 1: `answer_perplexity`
+```python
+def _compute_answer_perplexity(model, tokenizer, prompt, answer, completion):
+    """
+    reward = -ppl(prompt + answer, mask=answer_tokens) * coverage_ratio
+    """
+    text = prompt + answer
+    inputs = tokenizer(text, return_tensors="pt").to(model.device)
+    
+    prompt_len = len(tokenizer(prompt, add_special_tokens=False)["input_ids"])
+    answer_len = len(tokenizer(answer, add_special_tokens=False)["input_ids"])
+    
+    with torch.no_grad():
+        outputs = model(**inputs)
+        shift_logits = outputs.logits[..., :-1, :]
+        shift_labels = inputs["input_ids"][..., 1:]
+        
+        # Mask: only answer tokens
+        mask = torch.zeros(shift_labels.shape, dtype=torch.bool)
+        mask[0, prompt_len-1:prompt_len+answer_len-1] = True
+        
+        loss_fct = torch.nn.CrossEntropyLoss(reduction='none')
+        token_losses = loss_fct(
+            shift_logits.view(-1, shift_logits.size(-1)),
+            shift_labels.view(-1)
+        )
+        
+        answer_loss = token_losses[mask.view(-1)].mean().item()
+        coverage = min(1.0, len(tokenizer(completion)["input_ids"]) / answer_len)
+        
+        return -answer_loss * coverage
+```
+
+#### Mode 2: `completion_cross_entropy`
+```python
+def _compute_completion_cross_entropy(model, tokenizer, answer, completion):
+    """
+    reward = -CE(completion_logits, answer_tokens) * coverage_ratio
+    
+    Measures how well the completion matches the expected answer.
+    """
+    answer_tokens = tokenizer(answer, add_special_tokens=False)["input_ids"]
+    completion_tokens = tokenizer(completion, add_special_tokens=False)["input_ids"]
+    
+    # Get logits for completion
+    inputs = tokenizer(completion, return_tensors="pt").to(model.device)
+    with torch.no_grad():
+        outputs = model(**inputs)
+        logits = outputs.logits[..., :-1, :]  # Shift for next-token prediction
+    
+    # Calculate CE against answer tokens (up to min length)
+    min_len = min(logits.shape[1], len(answer_tokens))
+    if min_len == 0:
+        return 0.0
+    
+    target = torch.tensor(answer_tokens[:min_len]).to(model.device)
+    loss_fct = torch.nn.CrossEntropyLoss(reduction='mean')
+    ce_loss = loss_fct(logits[0, :min_len], target).item()
+    
+    coverage = min(1.0, len(completion_tokens) / len(answer_tokens))
+    return -ce_loss * coverage
+```
+
+---
+
+## 3. Configuration
+
+### RewardConfig (`src/config.py`)
 
 ```python
+class RewardConfig(BaseModel):
+    type: Literal["inverse_loss", "supervised"] = "inverse_loss"
+    answer_field: str = "answer"  # Field name for expected answer
+    supervised_mode: Literal["answer_perplexity", "completion_cross_entropy"] = "answer_perplexity"
+```
+
+### Config Files
+
+**unsupervised.yaml:**
+```yaml
+reward:
+  type: inverse_loss
+```
+
+**supervised.yaml:**
+```yaml
+reward:
+  type: supervised
+  answer_field: answer
+  supervised_mode: answer_perplexity  # or completion_cross_entropy
+```
+
+---
+
+## 4. Training with Unsloth + vLLM
+
+```python
+import os
+os.environ["UNSLOTH_VLLM_STANDBY"] = "1"  # 30% VRAM savings
+
 from unsloth import FastLanguageModel
 from trl import GRPOConfig, GRPOTrainer
 
-# 1. Load the model and tokenizer via Unsloth (4-bit quantization for VRAM savings)
-max_seq_length = 2048
+# Load model with 4-bit quantization
 model, tokenizer = FastLanguageModel.from_pretrained(
-    model_name = "your-base-model",
-    max_seq_length = max_seq_length,
-    load_in_4bit = True,
-    fast_inference = True, 
+    model_name="model_name",
+    max_seq_length=2048,
+    load_in_4bit=True,
+    fast_inference=True,
 )
 
-# 2. Add LoRA adapters (This creates the "Student" policy model)
-# The base frozen weights effectively act as your "Teacher" / Reference Model
+# Add LoRA adapters
 model = FastLanguageModel.get_peft_model(
     model,
-    r = 16,
-    target_modules = ["q_proj", "k_proj", "v_proj", "o_proj",
-                      "gate_proj", "up_proj", "down_proj",],
-    lora_alpha = 16,
-    lora_dropout = 0,
+    r=16,
+    target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                    "gate_proj", "up_proj", "down_proj"],
+    lora_alpha=16,
+    lora_dropout=0,
 )
 
-# 3. Instantiate the Reward Function
-# We pass the model in inference mode. In a LoRA setup, you can optionally 
-# disable the adapters during the reward calculation if you strictly want 
-# the base model to act as the evaluator.
-inverse_loss_reward_func = create_inverse_loss_reward(model, tokenizer)
+# Create reward function based on config
+from src.rewards import create_reward_function
+reward_func = create_reward_function(
+    model, tokenizer, 
+    reward_type="supervised",
+    supervised_mode="answer_perplexity"
+)
 
-# 4. Configure GRPO
+# Configure GRPO
 training_args = GRPOConfig(
-    output_dir = "grpo_self_distill_output",
-    learning_rate = 5e-6,
-    num_generations = 8, # The 'G' in GRPO
-    per_device_train_batch_size = 1, # Keep this small!
-    gradient_accumulation_steps = 4,
-    max_prompt_length = 512,
-    max_completion_length = 512,
-    # KL Divergence coefficient - crucial for preventing mode collapse
-    beta = 0.04, 
-    logging_steps = 10,
+    output_dir="output",
+    learning_rate=5e-6,
+    num_generations=8,
+    per_device_train_batch_size=1,
+    gradient_accumulation_steps=4,
+    max_prompt_length=512,
+    max_completion_length=512,
+    beta=0.04,  # KL penalty
 )
 
-# 5. Initialize Trainer
+# Train
 trainer = GRPOTrainer(
-    model = model,
-    reward_funcs = [inverse_loss_reward_func],
-    args = training_args,
-    train_dataset = your_unsupervised_dataset, # Dataset needs a "prompt" column
+    model=model,
+    reward_funcs=[reward_func],
+    args=training_args,
+    train_dataset=dataset,
 )
-
-# 6. Train
 trainer.train()
-
 ```
 
-### Key Takeaways for this Architecture
+---
 
-* **VRAM Safety:** By wrapping the reward calculation in `torch.no_grad()` and processing the 8 completions sequentially inside the reward function, we keep the VRAM spike strictly constrained.
-* **Granular Slicing:** Slicing the `token_losses` tensor ensures the model isn't being rewarded for the prompt, only its own generated continuation.
-* **The KL Penalty (`beta`):** This is your safety net against the model outputting gibberish just to game its own loss function.
+## 5. Key Implementation Notes
 
-Would you like me to walk through how to format your raw, unlabeled text dataset into the specific prompt structure that TRL's `GRPOTrainer` expects for this loop?
+### VRAM Safety
+- Reward calculation wrapped in `torch.no_grad()`
+- Process completions sequentially or in micro-batches
+- vLLM standby mode for inference memory savings
+
+### Mode Selection
+- **Unsupervised**: For domain adaptation without labeled data
+- **Supervised**: When you have prompt-answer pairs
+
+### Coverage Weighting
+The coverage ratio `min(1.0, len(completion)/len(answer))` ensures:
+- Short completions get penalized
+- Model is incentivized to generate complete answers
+- Prevents "gaming" by generating minimal text
+
+---
+
+## 6. Output Formats
+
+The trainer supports multiple output formats:
+- LoRA adapters (default)
+- Merged 16-bit model
+- Merged 4-bit model
+- GGUF for llama.cpp

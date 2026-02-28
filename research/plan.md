@@ -1,73 +1,124 @@
-# Architecture Overview: Self-Distillation via Group-Relative Policy Optimization (GRPO)
+# Architecture Overview: GRPO Trainer with Unsupervised & Supervised Modes
 
 ## Abstract
 
-This document outlines a method for fine-tuning Large Language Models (LLMs) using an unsupervised self-distillation approach. By leveraging Group-Relative Policy Optimization (GRPO) and replacing the traditional external Reward Model with the policy model's own internal confidence metrics (inverse loss/perplexity), we create a self-reinforcing feedback loop. This approach is highly effective for Unsupervised Domain Adaptation, allowing a model to align its generation style to a new domain without requiring labeled data or human preference feedback.
+This document outlines a GRPO-based fine-tuning system supporting **two modes**:
+1. **Unsupervised Self-Distillation**: Uses inverse loss (negative perplexity) as reward
+2. **Supervised GRPO**: Uses coverage-weighted loss comparing completions to expected answers
+
+Both approaches leverage Group-Relative Policy Optimization (GRPO) to eliminate the need for a separate Value Model.
 
 ---
 
-## 1. The Core Concept: Internal Confidence as a Reward Signal
+## 1. Unsupervised Mode: Internal Confidence as Reward
 
-In standard Reinforcement Learning from Human Feedback (RLHF), an external Reward Model is trained to score the policy model's outputs. In this self-distillation setup, the policy model acts as its own critic.
+In this self-distillation setup, the policy model acts as its own critic.
 
-The primary metric for the reward is **Inverse Loss** (Negative Log-Likelihood).
+### Reward Metric: Inverse Loss (Negative Log-Likelihood)
 
-* When a model generates a sequence of tokens, it computes the probability of each token.
-* A lower cross-entropy loss indicates higher internal confidence (lower perplexity) for that specific completion.
-* By converting this loss into a reward (e.g., multiplying by -1), we instruct the model to favor the completions it inherently finds the most coherent and mathematically probable based on its pre-trained or progressively fine-tuned weights.
+- When a model generates a sequence of tokens, it computes the probability of each token.
+- A lower cross-entropy loss indicates higher internal confidence (lower perplexity).
+- By converting this loss into a reward (multiplying by -1), we instruct the model to favor completions it finds most coherent.
 
----
+### Formula
 
-## 2. The GRPO Mechanism
+```
+reward = -avg_loss(completion_tokens)
+```
 
-Standard policy gradient methods rely on a separate Value Model to estimate a baseline for advantage calculation, doubling the memory footprint. GRPO eliminates the need for a Value Model by evaluating multiple completions against each other.
-
-Instead of estimating an absolute baseline, GRPO computes a relative baseline directly from a group of generations produced from the same prompt.
-
-### The Training Loop (Step-by-Step)
-
-1. **Exploration (Generation Phase):** For a given unlabeled prompt, the active policy model generates a group of $N$ distinct completions (e.g., $G_1, G_2, \dots, G_8$).
-2. **Evaluation (Scoring Phase):**
-The model performs a frozen forward pass over each generated completion to calculate the token-wise cross-entropy loss. The average loss of the completion tokens becomes the raw score.
-3. **Advantage Calculation (Relative Baseline):**
-The raw scores (inverse loss) are normalized within the group. The advantage $A_i$ for a specific generation $G_i$ is calculated using the mean ($\mu$) and standard deviation ($\sigma$) of the group's rewards:
-
-$$A_i = \frac{R_i - \mu}{\sigma}$$
-
-
-
-Completions with lower-than-average loss get a positive advantage; those with higher-than-average loss get a negative advantage.
-4. **Policy Update (Optimization Phase):**
-The model updates its weights to increase the likelihood of the generations with positive advantages, effectively pulling its "average" performance toward its "best" performance.
+Where loss is calculated only on completion tokens (not the prompt).
 
 ---
 
-## 3. Preventing Mode Collapse (The KL Penalty)
+## 2. Supervised Mode: Coverage-Weighted Loss
 
-A significant risk in self-distillation is mode collapse. If a model is rewarded purely for low loss, it will rapidly converge on generating highly repetitive, low-entropy text (e.g., repeating the word "the" infinitely).
+Supervised GRPO requires rewards that **vary per completion** to enable advantage calculation. We explored several approaches before settling on coverage-weighted loss.
 
-To counteract this, the optimization step includes a **Kullback-Leibler (KL) Divergence Penalty**.
+### Rejected Approaches
 
-* A frozen copy of the base model (the Reference Model) is kept in memory.
-* During the update step, the probability distribution of the active policy model is compared against the Reference Model.
-* If the policy model's outputs deviate too drastically from the Reference Model's expected distribution, the reward is heavily penalized.
-* This forces the model to remain coherent and structurally sound while it hunts for the most confident variations of its domain-specific outputs.
+1. **Discrete Rewards (exact_match, contains, fuzzy)** - Too sparse, doesn't provide gradient signal
+2. **Perplexity on Expected Answer** - All K completions get the SAME reward (doesn't vary), which breaks GRPO's advantage calculation: $A_i = \frac{R_i - \mu}{\sigma}$
+
+### Final Approach: Coverage-Weighted Loss
+
+Two modes available:
+
+#### Mode 1: `answer_perplexity`
+Calculates perplexity of the expected answer given the prompt:
+```
+reward = -ppl(prompt + answer, mask=answer_tokens) * coverage_ratio
+```
+
+#### Mode 2: `completion_cross_entropy`
+Calculates cross-entropy between completion logits and answer tokens:
+```
+reward = -CE(completion_logits, answer_tokens) * coverage_ratio
+```
+
+### Coverage Ratio
+
+Both modes apply a coverage penalty to discourage short completions:
+```
+coverage_ratio = min(1.0, len(completion_tokens) / len(answer_tokens))
+```
+
+This ensures the model is incentivized to generate complete answers.
 
 ---
 
-## 4. Why This Works for Unsupervised Domain Adaptation
+## 3. The GRPO Mechanism
 
-When adapting a model to a massive corpus of highly specialized text (e.g., legal documents, medical records, or proprietary code) where labeled QA pairs do not exist, this method shines:
+GRPO eliminates the need for a Value Model by evaluating multiple completions against each other.
 
-* **Zero Human Annotation:** It requires only raw text prompts.
-* **Self-Correction:** It allows the model to explore different ways of structuring a response in the new domain and naturally biases toward the phrasing that aligns best with the underlying statistical patterns of the domain.
-* **Hallucination Reduction:** Because it penalizes high-perplexity outputs relative to a group, it actively filters out anomalous, low-confidence "hallucinated" strings during the adaptation phase.
+### The Training Loop
+
+1. **Generation Phase**: For a given prompt, generate $K$ completions (e.g., $G_1, \dots, G_8$)
+2. **Scoring Phase**: Calculate reward for each completion using the selected mode
+3. **Advantage Calculation**: Normalize rewards within the group:
+   $$A_i = \frac{R_i - \mu}{\sigma}$$
+4. **Policy Update**: Update weights to increase likelihood of high-advantage completions
+
+---
+
+## 4. Preventing Mode Collapse (KL Penalty)
+
+The KL Divergence penalty prevents the model from generating low-quality text just to game the reward:
+
+- A frozen Reference Model is kept in memory
+- During updates, the policy model's distribution is compared against the reference
+- Deviations are penalized, forcing coherent outputs
 
 ---
 
 ## 5. System Constraints & Memory Management
 
-Because this approach requires generating multiple outputs and then calculating their losses before a backward pass, it is highly memory-intensive.
+- **vLLM Backend**: Fast inference with standby mode (30% VRAM savings via `UNSLOTH_VLLM_STANDBY=1`)
+- **4-bit Quantization**: LoRA adapters for memory-efficient training
+- **No-Gradient Evaluation**: Scoring phase drops gradients to prevent OOM
+- **Target Hardware**: Single GPU with 24GB VRAM
 
-* **No-Gradient Evaluation:** The scoring phase must strictly drop gradients to prevent Out-Of-Memory (OOM) failures.
-* **Quantization and Kernels:** Implementations usually rely on 4-bit quantization and fused attention kernels to make holding the policy model, the reference model, and the generation batches viable on single-node hardware.
+---
+
+## 6. Data Formats
+
+### Unsupervised (JSONL)
+```json
+{"text": "Your unlabeled text here..."}
+```
+
+### Supervised (JSONL)
+```json
+{"prompt": "Question or instruction", "answer": "Expected response"}
+```
+
+---
+
+## 7. Usage
+
+```bash
+# Unsupervised self-distillation
+uv run python scripts/train.py --config configs/unsupervised.yaml
+
+# Supervised GRPO
+uv run python scripts/train.py --config configs/supervised.yaml
+```

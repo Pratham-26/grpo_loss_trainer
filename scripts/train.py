@@ -1,6 +1,7 @@
 import argparse
 import os
 import sys
+from typing import Literal
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -41,6 +42,12 @@ def parse_args():
     return parser.parse_args()
 
 
+def get_mode_from_reward(reward_type: str) -> Literal["unsupervised", "supervised"]:
+    if reward_type == "inverse_loss":
+        return "unsupervised"
+    return "supervised"
+
+
 def main():
     args = parse_args()
 
@@ -66,8 +73,12 @@ def main():
         os.environ["UNSLOTH_VLLM_STANDBY"] = "1"
         print("vLLM standby mode enabled (30% VRAM savings)")
 
+    mode = get_mode_from_reward(config.reward.type)
+
     print(f"\nModel: {config.model.name}")
     print(f"Dataset: {config.data.path}")
+    print(f"Reward type: {config.reward.type}")
+    print(f"Training mode: {mode}")
     print(f"Max steps: {config.training.max_steps}")
     print(f"Num generations: {config.training.num_generations}")
 
@@ -91,10 +102,12 @@ def main():
     dataset = load_jsonl_dataset(
         path=config.data.path,
         prompt_field=config.data.prompt_field,
+        answer_field=config.data.answer_field,
         chat_template_name=config.data.chat_template,
+        mode=mode,
         max_samples=config.data.max_samples,
     )
-    validate_dataset(dataset)
+    validate_dataset(dataset, mode=mode)
     print(f"Dataset size: {len(dataset)} samples")
 
     print("\n" + "-" * 60)

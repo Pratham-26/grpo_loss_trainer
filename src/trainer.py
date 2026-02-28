@@ -4,7 +4,7 @@ from typing import Any
 from trl import GRPOConfig, GRPOTrainer
 from vllm import SamplingParams
 
-from src.rewards import create_inverse_loss_reward
+from src.rewards import get_reward_function
 
 
 def create_trainer(
@@ -13,7 +13,13 @@ def create_trainer(
     dataset: Any,
     config: Any,
 ) -> GRPOTrainer:
-    reward_func = create_inverse_loss_reward(model, tokenizer)
+    reward_func = get_reward_function(
+        reward_type=config.reward.type,
+        model=model,
+        tokenizer=tokenizer,
+        answer_field=config.data.answer_field,
+        supervised_mode=config.reward.supervised_mode,
+    )
 
     vllm_sampling_params = SamplingParams(
         min_p=config.vllm.min_p,

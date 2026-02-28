@@ -17,11 +17,13 @@ vllm:
   temperature: 1.0
 
 reward:
-  type: "inverse_loss"
+  type: "supervised"
+  answer_field: "answer"
+  supervised_mode: "answer_perplexity"
 
 data:
-  path: "data/train_unsupervised.jsonl"
-  prompt_field: "text"
+  path: "data/train_supervised.jsonl"
+  prompt_field: "prompt"
   answer_field: "answer"
   chat_template: "default"
   max_samples: null

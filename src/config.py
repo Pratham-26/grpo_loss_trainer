@@ -25,9 +25,16 @@ class VLLMConfig(BaseModel):
     temperature: float = 1.0
 
 
+class RewardConfig(BaseModel):
+    type: Literal["inverse_loss", "supervised"] = "inverse_loss"
+    answer_field: str = "answer"
+    supervised_mode: Literal["answer_perplexity", "completion_cross_entropy"] = "answer_perplexity"
+
+
 class DataConfig(BaseModel):
     path: str = "data/train.jsonl"
     prompt_field: str = "text"
+    answer_field: str = "answer"
     chat_template: str = "default"
     max_samples: int | None = None
 
@@ -69,6 +76,7 @@ class LoggingConfig(BaseModel):
 class Config(BaseModel):
     model: ModelConfig = Field(default_factory=ModelConfig)
     vllm: VLLMConfig = Field(default_factory=VLLMConfig)
+    reward: RewardConfig = Field(default_factory=RewardConfig)
     data: DataConfig = Field(default_factory=DataConfig)
     training: TrainingConfig = Field(default_factory=TrainingConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
