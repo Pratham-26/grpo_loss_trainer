@@ -18,7 +18,6 @@ def create_trainer(
         model=model,
         tokenizer=tokenizer,
         answer_field=config.data.answer_field,
-        supervised_mode=config.reward.supervised_mode,
     )
 
     vllm_sampling_params = SamplingParams(

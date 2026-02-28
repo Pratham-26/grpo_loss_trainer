@@ -75,42 +75,8 @@ Located in `src/rewards/supervised.py`.
 
 If we calculate `ppl(prompt + answer)` for all K completions, they ALL get the SAME reward because the answer is fixed. GRPO requires rewards to vary per completion for advantage calculation.
 
-### Two Modes
+### Coverage-Weighted Cross-Entropy Loss
 
-#### Mode 1: `answer_perplexity`
-```python
-def _compute_answer_perplexity(model, tokenizer, prompt, answer, completion):
-    """
-    reward = -ppl(prompt + answer, mask=answer_tokens) * coverage_ratio
-    """
-    text = prompt + answer
-    inputs = tokenizer(text, return_tensors="pt").to(model.device)
-    
-    prompt_len = len(tokenizer(prompt, add_special_tokens=False)["input_ids"])
-    answer_len = len(tokenizer(answer, add_special_tokens=False)["input_ids"])
-    
-    with torch.no_grad():
-        outputs = model(**inputs)
-        shift_logits = outputs.logits[..., :-1, :]
-        shift_labels = inputs["input_ids"][..., 1:]
-        
-        # Mask: only answer tokens
-        mask = torch.zeros(shift_labels.shape, dtype=torch.bool)
-        mask[0, prompt_len-1:prompt_len+answer_len-1] = True
-        
-        loss_fct = torch.nn.CrossEntropyLoss(reduction='none')
-        token_losses = loss_fct(
-            shift_logits.view(-1, shift_logits.size(-1)),
-            shift_labels.view(-1)
-        )
-        
-        answer_loss = token_losses[mask.view(-1)].mean().item()
-        coverage = min(1.0, len(tokenizer(completion)["input_ids"]) / answer_len)
-        
-        return -answer_loss * coverage
-```
-
-#### Mode 2: `completion_cross_entropy`
 ```python
 def _compute_completion_cross_entropy(model, tokenizer, answer, completion):
     """
@@ -150,7 +116,6 @@ def _compute_completion_cross_entropy(model, tokenizer, answer, completion):
 class RewardConfig(BaseModel):
     type: Literal["inverse_loss", "supervised"] = "inverse_loss"
     answer_field: str = "answer"  # Field name for expected answer
-    supervised_mode: Literal["answer_perplexity", "completion_cross_entropy"] = "answer_perplexity"
 ```
 
 ### Config Files
@@ -166,7 +131,6 @@ reward:
 reward:
   type: supervised
   answer_field: answer
-  supervised_mode: answer_perplexity  # or completion_cross_entropy
 ```
 
 ---
@@ -203,7 +167,6 @@ from src.rewards import create_reward_function
 reward_func = create_reward_function(
     model, tokenizer, 
     reward_type="supervised",
-    supervised_mode="answer_perplexity"
 )
 
 # Configure GRPO

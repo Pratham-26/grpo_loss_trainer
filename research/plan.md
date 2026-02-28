@@ -39,17 +39,8 @@ Supervised GRPO requires rewards that **vary per completion** to enable advantag
 1. **Discrete Rewards (exact_match, contains, fuzzy)** - Too sparse, doesn't provide gradient signal
 2. **Perplexity on Expected Answer** - All K completions get the SAME reward (doesn't vary), which breaks GRPO's advantage calculation: $A_i = \frac{R_i - \mu}{\sigma}$
 
-### Final Approach: Coverage-Weighted Loss
+### Coverage-Weighted Cross-Entropy Loss
 
-Two modes available:
-
-#### Mode 1: `answer_perplexity`
-Calculates perplexity of the expected answer given the prompt:
-```
-reward = -ppl(prompt + answer, mask=answer_tokens) * coverage_ratio
-```
-
-#### Mode 2: `completion_cross_entropy`
 Calculates cross-entropy between completion logits and answer tokens:
 ```
 reward = -CE(completion_logits, answer_tokens) * coverage_ratio
@@ -57,7 +48,7 @@ reward = -CE(completion_logits, answer_tokens) * coverage_ratio
 
 ### Coverage Ratio
 
-Both modes apply a coverage penalty to discourage short completions:
+The cross-entropy loss is multiplied by a coverage penalty to discourage short completions:
 ```
 coverage_ratio = min(1.0, len(completion_tokens) / len(answer_tokens))
 ```

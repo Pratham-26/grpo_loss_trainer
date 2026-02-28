@@ -1,31 +1,26 @@
 """
-Supervised GRPO reward using coverage-weighted loss.
+Supervised GRPO reward using coverage-weighted cross-entropy loss.
 
-Two modes available:
-- answer_perplexity (default): reward = -ppl(prompt + answer, mask=answer) * coverage
-- completion_cross_entropy: reward = -CE(completion_logits, answer_tokens) * coverage
+reward = -CE(completion_logits, answer_tokens) * coverage
 """
 
+from typing import Any, Callable
+
 import torch
-from typing import Any, Callable, Literal
 
 
 def create_supervised_reward(
     model: Any,
     tokenizer: Any,
     answer_field: str = "answer",
-    mode: Literal["answer_perplexity", "completion_cross_entropy"] = "answer_perplexity",
 ) -> Callable:
     """
-    Create a supervised reward using coverage-weighted loss.
+    Create a supervised reward using coverage-weighted cross-entropy loss.
 
     Args:
         model: Language model
         tokenizer: Tokenizer
         answer_field: Field name for expected answers in dataset
-        mode: "answer_perplexity" or "completion_cross_entropy"
-            - answer_perplexity: Measures how probable the model finds the expected answer
-            - completion_cross_entropy: Cross-entropy between completion logits and answer tokens
 
     Returns:
         Reward function compatible with GRPO trainer
@@ -49,7 +44,6 @@ def create_supervised_reward(
                 rewards.append(0.0)
                 continue
 
-            prompt_text = _extract_text(prompt)
             completion_text = _extract_text(completion)
 
             if not completion_text or not expected_answer:
@@ -68,16 +62,9 @@ def create_supervised_reward(
 
             coverage = min(1.0, len(completion_tokens) / max(1, len(answer_tokens)))
 
-            if mode == "answer_perplexity":
-                avg_loss = _compute_answer_perplexity(
-                    model, tokenizer, prompt_text, expected_answer
-                )
-            elif mode == "completion_cross_entropy":
-                avg_loss = _compute_completion_cross_entropy(
-                    model, tokenizer, completion_text, expected_answer
-                )
-            else:
-                avg_loss = 0.0
+            avg_loss = _compute_completion_cross_entropy(
+                model, tokenizer, completion_text, expected_answer
+            )
 
             reward = -avg_loss * coverage
             rewards.append(reward)
@@ -87,45 +74,6 @@ def create_supervised_reward(
     return supervised_reward
 
 
-def _compute_answer_perplexity(
-    model: Any,
-    tokenizer: Any,
-    prompt_text: str,
-    expected_answer: str,
-) -> float:
-    """
-    Option B: Compute perplexity on prompt + answer, with loss only on answer tokens.
-
-    Measures how probable the model finds the expected answer given the prompt.
-    """
-    text = prompt_text + expected_answer
-    inputs = tokenizer(text, return_tensors="pt").to(model.device)
-
-    prompt_token_ids = tokenizer(prompt_text, add_special_tokens=False)["input_ids"]
-    prompt_length = len(prompt_token_ids)
-
-    with torch.no_grad():
-        outputs = model(**inputs)
-        logits = outputs.logits
-
-        shift_logits = logits[..., :-1, :].contiguous()
-        shift_labels = inputs["input_ids"][..., 1:].contiguous()
-
-        loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
-        token_losses = loss_fct(
-            shift_logits.view(-1, shift_logits.size(-1)),
-            shift_labels.view(-1),
-        )
-
-        answer_start = max(0, prompt_length - 1)
-        answer_losses = token_losses[answer_start:]
-
-        if len(answer_losses) == 0:
-            return 0.0
-
-        return answer_losses.mean().item()
-
-
 def _compute_completion_cross_entropy(
     model: Any,
     tokenizer: Any,
@@ -133,7 +81,7 @@ def _compute_completion_cross_entropy(
     expected_answer: str,
 ) -> float:
     """
-    Option A: Compute cross-entropy between completion logits and answer tokens.
+    Compute cross-entropy between completion logits and answer tokens.
 
     Measures how well the completion's probability distribution matches the answer.
     """

@@ -28,7 +28,6 @@ class VLLMConfig(BaseModel):
 class RewardConfig(BaseModel):
     type: Literal["inverse_loss", "supervised"] = "inverse_loss"
     answer_field: str = "answer"
-    supervised_mode: Literal["answer_perplexity", "completion_cross_entropy"] = "answer_perplexity"
 
 
 class DataConfig(BaseModel):

@@ -9,7 +9,6 @@ def get_reward_function(
     model: Any,
     tokenizer: Any,
     answer_field: str = "answer",
-    supervised_mode: Literal["answer_perplexity", "completion_cross_entropy"] = "answer_perplexity",
 ) -> Callable:
     """
     Factory function to create reward function.
@@ -19,9 +18,6 @@ def get_reward_function(
         model: Language model
         tokenizer: Tokenizer
         answer_field: Field name for expected answers in dataset (supervised mode)
-        supervised_mode: "answer_perplexity" or "completion_cross_entropy"
-            - answer_perplexity: -ppl(prompt + answer, mask=answer) * coverage
-            - completion_cross_entropy: -CE(completion_logits, answer_tokens) * coverage
 
     Returns:
         Reward function compatible with GRPO trainer
@@ -33,7 +29,6 @@ def get_reward_function(
             model=model,
             tokenizer=tokenizer,
             answer_field=answer_field,
-            mode=supervised_mode,
         )
     else:
         raise ValueError(f"Unknown reward_type: {reward_type}")

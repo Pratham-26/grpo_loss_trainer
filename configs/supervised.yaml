@@ -19,7 +19,6 @@ vllm:
 reward:
   type: "supervised"
   answer_field: "answer"
-  supervised_mode: "answer_perplexity"
 
 data:
   path: "data/train_supervised.jsonl"
