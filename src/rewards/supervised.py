@@ -35,7 +35,14 @@ def create_supervised_reward(
         prompts: list, completions: list, answers: list | None = None, **kwargs
     ) -> list[float]:
         rewards = []
-        answers = answers or kwargs.get(answer_field, [])
+        if answers is None:
+            answers = kwargs.get(answer_field, [])
+
+        if len(prompts) != len(completions) or len(prompts) != len(answers):
+            raise ValueError(
+                f"Mismatched list lengths: prompts={len(prompts)}, "
+                f"completions={len(completions)}, answers={len(answers)}"
+            )
 
         for prompt, completion, expected_answer in zip(prompts, completions, answers):
             if not expected_answer:

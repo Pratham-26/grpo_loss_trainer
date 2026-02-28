@@ -1,7 +1,8 @@
 from typing import Any
 
-import torch
 from unsloth import FastLanguageModel
+
+from src.utils import clear_cuda_cache
 
 
 def load_model(config: Any) -> tuple[Any, Any]:
@@ -60,7 +61,4 @@ def apply_chat_template(tokenizer: Any, template: str | None) -> Any:
 
 
 def cleanup_memory() -> None:
-    torch.cuda.empty_cache()
-    import gc
-
-    gc.collect()
+    clear_cuda_cache()

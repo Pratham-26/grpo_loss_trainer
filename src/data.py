@@ -1,3 +1,5 @@
+import json
+
 from pathlib import Path
 from typing import Literal
 
@@ -24,8 +26,6 @@ def load_jsonl_dataset(
             line = line.strip()
             if not line:
                 continue
-
-            import json
 
             item = json.loads(line)
             prompt_text = item.get(prompt_field, "")

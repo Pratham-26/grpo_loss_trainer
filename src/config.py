@@ -99,12 +99,21 @@ def merge_cli_overrides(config: Config, overrides: dict) -> Config:
         return config
 
     config_dict = config.model_dump()
+    unknown_keys = []
+
     for key, value in overrides.items():
         if "." in key:
             section, param = key.split(".", 1)
             if section in config_dict and param in config_dict[section]:
                 config_dict[section][param] = value
+            else:
+                unknown_keys.append(key)
         elif key in config_dict:
             config_dict[key] = value
+        else:
+            unknown_keys.append(key)
+
+    if unknown_keys:
+        raise ValueError(f"Unknown config keys: {', '.join(unknown_keys)}")
 
     return Config(**config_dict)

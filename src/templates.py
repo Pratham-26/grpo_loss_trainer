@@ -3,10 +3,10 @@ from pathlib import Path
 
 DEFAULT_CHAT_TEMPLATE = (
     "{% if messages[0]['role'] == 'system' %}"
-    "{{ messages[0]['content'] + eos_token }}"
+    "{{ messages[0]['content'] }}"
     "{% set loop_messages = messages[1:] %}"
     "{% else %}"
-    "{{ messages[0]['content'] + eos_token }}"
+    "{{ messages[0]['content'] }}"
     "{% set loop_messages = messages %}"
     "{% endif %}"
     "{% for message in loop_messages %}"
